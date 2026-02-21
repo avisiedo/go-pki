@@ -1,0 +1,125 @@
+package pki
+
+import (
+    "crypto"
+    "crypto/rand"
+    "crypto/rsa"
+    "crypto/x509"
+    "crypto/x509/pkix"
+    "math/big"
+    "sync"
+    "time"
+)
+
+// BasicPublicKeyInfrastructure is a simple implementation of PublicKeyInfrastructure
+// that holds a single root CA which is always online.
+type BasicPublicKeyInfrastructure struct {
+    mu       sync.RWMutex
+    rootCert *x509.Certificate
+    rootKey  *rsa.PrivateKey
+}
+
+// compile-time check that BasicPublicKeyInfrastructure implements the interface.
+var _ PublicKeyInfrastructure = (*BasicPublicKeyInfrastructure)(nil)
+
+// newBasicPublicKeyInfrastructure creates and initializes a BasicPublicKeyInfrastructure.
+// It generates a self-signed root certificate and key.
+func newBasicPublicKeyInfrastructure() (*BasicPublicKeyInfrastructure, error) {
+    // Generate RSA key for root CA.
+    rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
+    if err != nil {
+        return nil, err
+    }
+
+    // Create a basic self-signed certificate template for the root CA.
+    serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+    if err != nil {
+        return nil, err
+    }
+
+    now := time.Now()
+    template := &x509.Certificate{
+        SerialNumber: serial,
+        Subject: pkix.Name{
+            Organization: []string{"BasicRootCA"},
+            CommonName:   "Basic Root CA",
+        },
+        NotBefore:             now.Add(-5 * time.Minute),
+        NotAfter:              now.AddDate(10, 0, 0), // long lived root
+        KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+        BasicConstraintsValid: true,
+        IsCA:                  true,
+        MaxPathLen:            1,
+    }
+
+    derBytes, err := x509.CreateCertificate(rand.Reader, template, template, &rootKey.PublicKey, rootKey)
+    if err != nil {
+        return nil, err
+    }
+
+    rootCert, err := x509.ParseCertificate(derBytes)
+    if err != nil {
+        return nil, err
+    }
+
+    return &BasicPublicKeyInfrastructure{
+        rootCert: rootCert,
+        rootKey:  rootKey,
+    }, nil
+}
+
+// NewBasicPublicKeyInfrastructure constructs a BasicPublicKeyInfrastructure
+// and returns it as the PublicKeyInfrastructure interface.
+func NewBasicPublicKeyInfrastructure() (PublicKeyInfrastructure, error) {
+    return newBasicPublicKeyInfrastructure()
+}
+
+// RootCertificate returns the root CA certificate.
+func (b *BasicPublicKeyInfrastructure) RootCertificate() *x509.Certificate {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    return b.rootCert
+}
+
+// RootPrivateKey returns the root CA private key.
+func (b *BasicPublicKeyInfrastructure) RootPrivateKey() crypto.PrivateKey {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    return b.rootKey
+}
+
+// IssueCertificate signs the provided template using the root CA and returns
+// the DER-encoded certificate bytes. The caller must set at least template.PublicKey.
+func (b *BasicPublicKeyInfrastructure) IssueCertificate(template *x509.Certificate) ([]byte, error) {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+
+    // Ensure template has a serial number.
+    if template.SerialNumber == nil {
+        serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+        if err != nil {
+            return nil, err
+        }
+        template.SerialNumber = serial
+    }
+
+    // If NotBefore/NotAfter are zero, set reasonable defaults.
+    if template.NotBefore.IsZero() {
+        template.NotBefore = time.Now().Add(-5 * time.Minute)
+    }
+    if template.NotAfter.IsZero() {
+        template.NotAfter = time.Now().Add(24 * time.Hour)
+    }
+
+    der, err := x509.CreateCertificate(rand.Reader, template, b.rootCert, template.PublicKey, b.rootKey)
+    if err != nil {
+        return nil, err
+    }
+
+    return der, nil
+}
+
+// IsOnline always returns true for this basic implementation (root CA always online).
+func (b *BasicPublicKeyInfrastructure) IsOnline() bool {
+    return true
+}
